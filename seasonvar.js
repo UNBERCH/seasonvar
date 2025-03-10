@@ -1,6 +1,7 @@
 (function() {
     'use strict';
 
+    // Конфігурація
     const config = {
         baseUrl: 'https://seasonvar.ru',
         cacheKeyPrefix: 'seasonvar_',
@@ -8,6 +9,7 @@
         timeout: 10000 // 10 секунд таймаут для запитів
     };
 
+    // Клас для роботи з Seasonvar
     class SeasonvarAPI {
         constructor() {
             this.parser = new DOMParser();
@@ -20,7 +22,7 @@
             const now = Date.now();
             const lastUpdate = localStorage.getItem(timeKey);
 
-            if (lastUpdate && (now - lastUpdate) < config.updateInterval) {
+            if (lastUpdate && (now - parseInt(lastUpdate)) < config.updateInterval) {
                 const cachedData = localStorage.getItem(cacheKey);
                 if (cachedData) return JSON.parse(cachedData);
             }
@@ -29,9 +31,9 @@
                 const response = await this.fetchWithTimeout(url);
                 const data = await processor(response);
                 
-                if (data.length > 0) {
+                if (data && data.length > 0) {
                     localStorage.setItem(cacheKey, JSON.stringify(data));
-                    localStorage.setItem(timeKey, now);
+                    localStorage.setItem(timeKey, now.toString());
                 }
                 return data;
             } catch (error) {
@@ -41,19 +43,22 @@
             }
         }
 
-        // Допоміжна функція fetch з таймаутом
+        // Fetch із таймаутом
         async fetchWithTimeout(url) {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), config.timeout);
             
             try {
-                const response = await fetch(url, { signal: controller.signal });
+                const response = await fetch(url, { 
+                    signal: controller.signal,
+                    headers: { 'User-Agent': 'Mozilla/5.0' } // Додано для обходу можливих блокувань
+                });
                 clearTimeout(timeoutId);
                 if (!response.ok) throw new Error(`HTTP error ${response.status}`);
                 return response.text();
             } catch (error) {
                 clearTimeout(timeoutId);
-                throw error;
+                throw error.name === 'AbortError' ? new Error('Request timed out') : error;
             }
         }
 
@@ -63,13 +68,21 @@
                 const doc = this.parser.parseFromString(html, 'text/html');
                 const items = [];
 
-                for (const el of doc.querySelectorAll('.short-story')) {
-                    const title = el.querySelector('.title a')?.textContent?.trim();
-                    const link = config.baseUrl + el.querySelector('.title a')?.getAttribute('href');
-                    const img = el.querySelector('img')?.getAttribute('src');
+                // Оновлений селектор для гнучкості
+                const contentElements = doc.querySelectorAll('.pgs-serials-list .short, .short-story');
+                for (const el of contentElements) {
+                    const titleEl = el.querySelector('.title a, .short-title a');
+                    const title = titleEl?.textContent?.trim();
+                    const link = titleEl ? new URL(titleEl.getAttribute('href'), config.baseUrl).href : null;
+                    const img = el.querySelector('img')?.getAttribute('src') || el.querySelector('img')?.getAttribute('data-src');
 
-                    if (title && link && img) {
-                        items.push({ name: title, link, picture: img, type: 'movie' });
+                    if (title && link) {
+                        items.push({
+                            name: title,
+                            link,
+                            picture: img ? new URL(img, config.baseUrl).href : null,
+                            type: 'movie'
+                        });
                     }
                 }
                 return items;
@@ -83,23 +96,40 @@
                 const doc = this.parser.parseFromString(html, 'text/html');
                 const episodes = [];
 
-                for (const seasonEl of doc.querySelectorAll('.seasons-list .season')) {
-                    const seasonTitle = seasonEl.querySelector('.season-title')?.textContent?.trim() || 'Сезон';
-
-                    for (const episodeEl of seasonEl.querySelectorAll('.episode')) {
-                        const episodeTitle = episodeEl.textContent.trim();
-                        const episodeLink = episodeEl.getAttribute('data-url');
-
-                        if (episodeTitle && episodeLink) {
+                // Універсальніший підхід до сезонів і епізодів
+                const seasonBlocks = doc.querySelectorAll('.film-translation-block, .seasons-list .season');
+                if (seasonBlocks.length === 0) {
+                    // Якщо сезони не знайдені, шукаємо прямі посилання
+                    const episodeEls = doc.querySelectorAll('.pgs-player source, .episode-item');
+                    for (const ep of episodeEls) {
+                        const epTitle = ep.getAttribute('data-title') || ep.textContent?.trim() || 'Епізод';
+                        const epLink = ep.getAttribute('data-url') || ep.getAttribute('src');
+                        if (epLink) {
                             episodes.push({
-                                name: `${seasonTitle} - ${episodeTitle}`,
-                                link: config.baseUrl + episodeLink,
+                                name: epTitle,
+                                link: new URL(epLink, config.baseUrl).href,
                                 type: 'episode'
                             });
                         }
                     }
+                } else {
+                    for (const seasonEl of seasonBlocks) {
+                        const seasonTitle = seasonEl.querySelector('.season-title, h3')?.textContent?.trim() || 'Сезон';
+                        const episodeEls = seasonEl.querySelectorAll('.episode, .episode-item');
+                        for (const ep of episodeEls) {
+                            const epTitle = ep.textContent?.trim() || 'Епізод';
+                            const epLink = ep.getAttribute('data-url') || ep.getAttribute('href');
+                            if (epTitle && epLink) {
+                                episodes.push({
+                                    name: `${seasonTitle} - ${epTitle}`,
+                                    link: new URL(epLink, config.baseUrl).href,
+                                    type: 'episode'
+                                });
+                            }
+                        }
+                    }
                 }
-                return episodes;
+                return episodes.length > 0 ? episodes : [{ name: 'Епізоди не знайдені', link: '#', type: 'info' }];
             } catch (error) {
                 console.error('Помилка завантаження епізодів:', error);
                 return [];
@@ -114,21 +144,42 @@
 
             try {
                 const html = await this.fetchWithTimeout(episodeUrl);
-                const iframeMatch = html.match(/iframe src="(.*?)"/);
-                if (!iframeMatch) return [];
+                const doc = this.parser.parseFromString(html, 'text/html');
+                const videoLinks = [];
 
-                const iframeHtml = await this.fetchWithTimeout(iframeMatch[1]);
-                const videoLinks = [
-                    ...[...iframeHtml.matchAll(/file: "(https?:\/\/.*?\.mp4)"/g)]
-                        .map(m => ({ file: m[1], type: 'mp4' })),
-                    ...[...iframeHtml.matchAll(/file: "(https?:\/\/.*?\.m3u8)"/g)]
-                        .map(m => ({ file: m[1], type: 'hls' }))
-                ];
+                // Пошук у <video> або iframe
+                const videoEls = doc.querySelectorAll('video source');
+                if (videoEls.length > 0) {
+                    for (const source of videoEls) {
+                        const file = source.getAttribute('src');
+                        if (file) {
+                            const type = file.endsWith('.m3u8') ? 'hls' : 'mp4';
+                            videoLinks.push({ file, type });
+                        }
+                    }
+                } else {
+                    const iframeSrc = doc.querySelector('iframe')?.getAttribute('src');
+                    if (iframeSrc) {
+                        const iframeHtml = await this.fetchWithTimeout(iframeSrc);
+                        const links = [
+                            ...[...iframeHtml.matchAll(/file:\s*["'](.*?\.(?:mp4|m3u8))["']/g)].map(m => ({
+                                file: m[1],
+                                type: m[1].endsWith('.m3u8') ? 'hls' : 'mp4'
+                            })),
+                            ...[...iframeHtml.matchAll(/src=["'](.*?\.(?:mp4|m3u8))["']/g)].map(m => ({
+                                file: m[1],
+                                type: m[1].endsWith('.m3u8') ? 'hls' : 'mp4'
+                            }))
+                        ];
+                        videoLinks.push(...links);
+                    }
+                }
 
                 if (videoLinks.length > 0) {
                     localStorage.setItem(cacheKey, JSON.stringify(videoLinks));
+                    return videoLinks;
                 }
-                return videoLinks;
+                return [{ file: '#', type: 'error', error: 'Відео не знайдено' }];
             } catch (error) {
                 console.error('Помилка отримання відео:', error);
                 return [];
@@ -136,43 +187,56 @@
         }
     }
 
-    // Ініціалізація плагіну
+    // Ініціалізація плагіна
     function initializePlugin() {
         const api = new SeasonvarAPI();
 
-        Lampa.Source.add('seasonvar', {
-            title: 'Seasonvar',
-            icon: `${config.baseUrl}/favicon.ico`,
-            search: true,
+        // Реєстрація джерела в Lampa
+        if (typeof Lampa !== 'undefined' && Lampa.Source) {
+            Lampa.Source.add('seasonvar', {
+                title: 'Seasonvar',
+                icon: `${config.baseUrl}/favicon.ico`,
+                search: true,
 
-            async onSearch(query, callback) {
-                const searchUrl = `${config.baseUrl}/search?query=${encodeURIComponent(query)}`;
-                callback(await api.getContent(searchUrl, `search_${query}`));
-            },
+                async onSearch(query, callback) {
+                    const searchUrl = `${config.baseUrl}/search?query=${encodeURIComponent(query)}`;
+                    const results = await api.getContent(searchUrl, `search_${query}`);
+                    callback(results);
+                },
 
-            onStart(search, callback) {
-                const categories = [
-                    { title: 'Новинки', url: `${config.baseUrl}/new` },
-                    { title: 'Популярне', url: `${config.baseUrl}/top` },
-                    { title: 'Жанри', url: `${config.baseUrl}/genres` }
-                ];
-                callback(categories.map(cat => ({ name: cat.title, link: cat.url, type: 'category' })));
-            },
+                onStart(search, callback) {
+                    const categories = [
+                        { title: 'Новинки', url: `${config.baseUrl}/new` },
+                        { title: 'Популярне', url: `${config.baseUrl}/top` },
+                        { title: 'Жанри', url: `${config.baseUrl}/genres` }
+                    ];
+                    callback(categories.map(cat => ({ name: cat.title, link: cat.url, type: 'category' })));
+                },
 
-            async onCategory(category, callback) {
-                callback(await api.getContent(category.link, `category_${category.name}`));
-            },
+                async onCategory(category, callback) {
+                    const results = await api.getContent(category.link, `category_${category.name}`);
+                    callback(results);
+                },
 
-            async onMovie(movie, callback) {
-                const episodes = await api.getEpisodes(movie.link);
-                callback(episodes.length > 0 ? episodes : [{ name: 'Серії не знайдено', link: '#', type: 'info' }]);
-            },
+                async onMovie(movie, callback) {
+                    const episodes = await api.getEpisodes(movie.link);
+                    callback(episodes);
+                },
 
-            async onEpisode(episode, callback) {
-                callback(await api.getDirectVideoLink(episode.link));
-            }
-        });
+                async onEpisode(episode, callback) {
+                    const links = await api.getDirectVideoLink(episode.link);
+                    callback(links);
+                }
+            });
+        } else {
+            console.error('Lampa API недоступне. Перевірте версію Lampa TV.');
+        }
     }
 
-    initializePlugin();
+    // Виконання ініціалізації
+    try {
+        initializePlugin();
+    } catch (error) {
+        console.error('Помилка ініціалізації плагіна Seasonvar:', error);
+    }
 })();
