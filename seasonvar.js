@@ -1,21 +1,18 @@
 (function() {
     'use strict';
 
-    // Конфігурація
     const config = {
         baseUrl: 'https://seasonvar.ru',
         cacheKeyPrefix: 'seasonvar_',
-        updateInterval: 6 * 60 * 60 * 1000, // 6 годин у мілісекундах
-        timeout: 10000 // 10 секунд таймаут для запитів
+        updateInterval: 6 * 60 * 60 * 1000,
+        timeout: 10000
     };
 
-    // Клас для роботи з Seasonvar
     class SeasonvarAPI {
         constructor() {
             this.parser = new DOMParser();
         }
 
-        // Утилітна функція для кешування
         async loadCachedContent(url, cacheName, processor) {
             const cacheKey = `${config.cacheKeyPrefix}${cacheName}`;
             const timeKey = `${cacheKey}_time`;
@@ -30,7 +27,6 @@
             try {
                 const response = await this.fetchWithTimeout(url);
                 const data = await processor(response);
-                
                 if (data && data.length > 0) {
                     localStorage.setItem(cacheKey, JSON.stringify(data));
                     localStorage.setItem(timeKey, now.toString());
@@ -43,39 +39,33 @@
             }
         }
 
-        // Fetch із таймаутом
         async fetchWithTimeout(url) {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), config.timeout);
-            
             try {
                 const response = await fetch(url, { 
                     signal: controller.signal,
-                    headers: { 'User-Agent': 'Mozilla/5.0' } // Додано для обходу можливих блокувань
+                    headers: { 'User-Agent': 'Mozilla/5.0' }
                 });
                 clearTimeout(timeoutId);
                 if (!response.ok) throw new Error(`HTTP error ${response.status}`);
                 return response.text();
             } catch (error) {
                 clearTimeout(timeoutId);
-                throw error.name === 'AbortError' ? new Error('Request timed out') : error;
+                throw error;
             }
         }
 
-        // Отримання списку контенту
         async getContent(url, cacheName) {
             return this.loadCachedContent(url, cacheName, async (html) => {
                 const doc = this.parser.parseFromString(html, 'text/html');
                 const items = [];
-
-                // Оновлений селектор для гнучкості
                 const contentElements = doc.querySelectorAll('.pgs-serials-list .short, .short-story');
                 for (const el of contentElements) {
                     const titleEl = el.querySelector('.title a, .short-title a');
                     const title = titleEl?.textContent?.trim();
                     const link = titleEl ? new URL(titleEl.getAttribute('href'), config.baseUrl).href : null;
                     const img = el.querySelector('img')?.getAttribute('src') || el.querySelector('img')?.getAttribute('data-src');
-
                     if (title && link) {
                         items.push({
                             name: title,
@@ -89,17 +79,13 @@
             });
         }
 
-        // Отримання епізодів
         async getEpisodes(seriesUrl) {
             try {
                 const html = await this.fetchWithTimeout(seriesUrl);
                 const doc = this.parser.parseFromString(html, 'text/html');
                 const episodes = [];
-
-                // Універсальніший підхід до сезонів і епізодів
                 const seasonBlocks = doc.querySelectorAll('.film-translation-block, .seasons-list .season');
                 if (seasonBlocks.length === 0) {
-                    // Якщо сезони не знайдені, шукаємо прямі посилання
                     const episodeEls = doc.querySelectorAll('.pgs-player source, .episode-item');
                     for (const ep of episodeEls) {
                         const epTitle = ep.getAttribute('data-title') || ep.textContent?.trim() || 'Епізод';
@@ -136,7 +122,6 @@
             }
         }
 
-        // Отримання прямих посилань на відео
         async getDirectVideoLink(episodeUrl) {
             const cacheKey = `${config.cacheKeyPrefix}video_${episodeUrl}`;
             const cachedVideo = localStorage.getItem(cacheKey);
@@ -146,8 +131,6 @@
                 const html = await this.fetchWithTimeout(episodeUrl);
                 const doc = this.parser.parseFromString(html, 'text/html');
                 const videoLinks = [];
-
-                // Пошук у <video> або iframe
                 const videoEls = doc.querySelectorAll('video source');
                 if (videoEls.length > 0) {
                     for (const source of videoEls) {
@@ -174,7 +157,6 @@
                         videoLinks.push(...links);
                     }
                 }
-
                 if (videoLinks.length > 0) {
                     localStorage.setItem(cacheKey, JSON.stringify(videoLinks));
                     return videoLinks;
@@ -187,56 +169,54 @@
         }
     }
 
-    // Ініціалізація плагіна
     function initializePlugin() {
         const api = new SeasonvarAPI();
-
-        // Реєстрація джерела в Lampa
-        if (typeof Lampa !== 'undefined' && Lampa.Source) {
-            Lampa.Source.add('seasonvar', {
-                title: 'Seasonvar',
-                icon: `${config.baseUrl}/favicon.ico`,
-                search: true,
-
-                async onSearch(query, callback) {
-                    const searchUrl = `${config.baseUrl}/search?query=${encodeURIComponent(query)}`;
-                    const results = await api.getContent(searchUrl, `search_${query}`);
-                    callback(results);
-                },
-
-                onStart(search, callback) {
-                    const categories = [
-                        { title: 'Новинки', url: `${config.baseUrl}/new` },
-                        { title: 'Популярне', url: `${config.baseUrl}/top` },
-                        { title: 'Жанри', url: `${config.baseUrl}/genres` }
-                    ];
-                    callback(categories.map(cat => ({ name: cat.title, link: cat.url, type: 'category' })));
-                },
-
-                async onCategory(category, callback) {
-                    const results = await api.getContent(category.link, `category_${category.name}`);
-                    callback(results);
-                },
-
-                async onMovie(movie, callback) {
-                    const episodes = await api.getEpisodes(movie.link);
-                    callback(episodes);
-                },
-
-                async onEpisode(episode, callback) {
-                    const links = await api.getDirectVideoLink(episode.link);
-                    callback(links);
-                }
-            });
+        if (typeof Lampa === 'undefined') {
+            console.error('Lampa API недоступне.');
+            return;
+        }
+        const source = {
+            title: 'Seasonvar',
+            icon: `${config.baseUrl}/favicon.ico`,
+            search: true,
+            async onSearch(query, callback) {
+                const searchUrl = `${config.baseUrl}/search?query=${encodeURIComponent(query)}`;
+                const results = await api.getContent(searchUrl, `search_${query}`);
+                callback(results);
+            },
+            onStart(search, callback) {
+                const categories = [
+                    { title: 'Новинки', url: `${config.baseUrl}/new` },
+                    { title: 'Популярне', url: `${config.baseUrl}/top` },
+                    { title: 'Жанри', url: `${config.baseUrl}/genres` }
+                ];
+                callback(categories.map(cat => ({ name: cat.title, link: cat.url, type: 'category' })));
+            },
+            async onCategory(category, callback) {
+                const results = await api.getContent(category.link, `category_${category.name}`);
+                callback(results);
+            },
+            async onMovie(movie, callback) {
+                const episodes = await api.getEpisodes(movie.link);
+                callback(episodes);
+            },
+            async onEpisode(episode, callback) {
+                const links = await api.getDirectVideoLink(episode.link);
+                callback(links);
+            }
+        };
+        if (Lampa.Source && typeof Lampa.Source.add === 'function') {
+            Lampa.Source.add('seasonvar', source);
+        } else if (Lampa.Plugin && typeof Lampa.Plugin.add === 'function') {
+            Lampa.Plugin.add('seasonvar', source);
         } else {
-            console.error('Lampa API недоступне. Перевірте версію Lampa TV.');
+            console.error('Невідомий API Lampa.');
         }
     }
 
-    // Виконання ініціалізації
     try {
         initializePlugin();
     } catch (error) {
-        console.error('Помилка ініціалізації плагіна Seasonvar:', error);
+        console.error('Помилка ініціалізації плагіна:', error);
     }
 })();
